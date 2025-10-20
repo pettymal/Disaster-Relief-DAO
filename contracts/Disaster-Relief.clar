@@ -483,3 +483,230 @@
     false
   )
 )
+
+(define-constant err-milestone-not-found (err u115))
+(define-constant err-milestone-already-completed (err u116))
+(define-constant err-previous-milestone-incomplete (err u117))
+(define-constant err-no-milestones (err u118))
+(define-constant err-invalid-milestone-order (err u119))
+
+(define-data-var milestone-counter uint u0)
+
+(define-map proposal-milestones
+  uint
+  {
+    proposal-id: uint,
+    total-milestones: uint,
+    completed-milestones: uint,
+    total-released: uint,
+    active: bool
+  }
+)
+
+(define-map milestones
+  {proposal-id: uint, milestone-number: uint}
+  {
+    description: (string-ascii 256),
+    amount: uint,
+    completed: bool,
+    verified-by: (optional principal),
+    completed-at: (optional uint),
+    verification-notes: (string-ascii 256)
+  }
+)
+
+(define-public (create-milestone-proposal 
+  (crisis-id uint)
+  (recipient principal)
+  (description (string-ascii 256))
+  (milestone-descriptions (list 10 (string-ascii 256)))
+  (milestone-amounts (list 10 uint))
+)
+  (let (
+    (proposal-id (+ (var-get proposal-counter) u1))
+    (total-amount (fold + milestone-amounts u0))
+    (milestone-count (len milestone-amounts))
+  )
+    (asserts! (default-to false (map-get? members tx-sender)) err-unauthorized)
+    (asserts! (default-to false (map-get? verified-addresses recipient)) err-verification-required)
+    (asserts! (> milestone-count u0) err-no-milestones)
+    (asserts! (is-eq milestone-count (len milestone-descriptions)) err-invalid-amount)
+    (asserts! (> total-amount u0) err-invalid-amount)
+    (asserts! (<= total-amount (var-get dao-treasury)) err-insufficient-funds)
+    
+    (let ((crisis (unwrap! (map-get? crises crisis-id) err-not-found)))
+      (asserts! (get active crisis) err-crisis-not-active)
+      
+      (map-set proposals proposal-id {
+        crisis-id: crisis-id,
+        recipient: recipient,
+        amount: total-amount,
+        description: description,
+        proposer: tx-sender,
+        votes-for: u0,
+        votes-against: u0,
+        created-at: stacks-block-height,
+        executed: false,
+        active: true
+      })
+      
+      (map-set proposal-milestones proposal-id {
+        proposal-id: proposal-id,
+        total-milestones: milestone-count,
+        completed-milestones: u0,
+        total-released: u0,
+        active: true
+      })
+      
+      (unwrap! (create-milestones proposal-id milestone-descriptions milestone-amounts u1) err-invalid-amount)
+      
+      (var-set proposal-counter proposal-id)
+      (ok proposal-id)
+    )
+  )
+)
+
+(define-private (create-milestones 
+  (proposal-id uint)
+  (descriptions (list 10 (string-ascii 256)))
+  (amounts (list 10 uint))
+  (current-number uint)
+)
+  (match (as-max-len? descriptions u10)
+    desc-list
+      (match (as-max-len? amounts u10)
+        amt-list
+          (begin
+            (map create-single-milestone
+              (list 
+                {p: proposal-id, n: u1, d: (default-to "" (element-at? desc-list u0)), a: (default-to u0 (element-at? amt-list u0))}
+                {p: proposal-id, n: u2, d: (default-to "" (element-at? desc-list u1)), a: (default-to u0 (element-at? amt-list u1))}
+                {p: proposal-id, n: u3, d: (default-to "" (element-at? desc-list u2)), a: (default-to u0 (element-at? amt-list u2))}
+                {p: proposal-id, n: u4, d: (default-to "" (element-at? desc-list u3)), a: (default-to u0 (element-at? amt-list u3))}
+                {p: proposal-id, n: u5, d: (default-to "" (element-at? desc-list u4)), a: (default-to u0 (element-at? amt-list u4))}
+                {p: proposal-id, n: u6, d: (default-to "" (element-at? desc-list u5)), a: (default-to u0 (element-at? amt-list u5))}
+                {p: proposal-id, n: u7, d: (default-to "" (element-at? desc-list u6)), a: (default-to u0 (element-at? amt-list u6))}
+                {p: proposal-id, n: u8, d: (default-to "" (element-at? desc-list u7)), a: (default-to u0 (element-at? amt-list u7))}
+                {p: proposal-id, n: u9, d: (default-to "" (element-at? desc-list u8)), a: (default-to u0 (element-at? amt-list u8))}
+                {p: proposal-id, n: u10, d: (default-to "" (element-at? desc-list u9)), a: (default-to u0 (element-at? amt-list u9))}
+              )
+            )
+            (ok true)
+          )
+        (err err-invalid-amount)
+      )
+    (err err-invalid-amount)
+  )
+)
+
+(define-private (create-single-milestone (data {p: uint, n: uint, d: (string-ascii 256), a: uint}))
+  (if (> (get a data) u0)
+    (map-set milestones
+      {proposal-id: (get p data), milestone-number: (get n data)}
+      {
+        description: (get d data),
+        amount: (get a data),
+        completed: false,
+        verified-by: none,
+        completed-at: none,
+        verification-notes: ""
+      }
+    )
+    false
+  )
+)
+
+(define-public (complete-milestone 
+  (proposal-id uint)
+  (milestone-number uint)
+  (verification-notes (string-ascii 256))
+)
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) err-not-found))
+    (milestone-data (unwrap! (map-get? proposal-milestones proposal-id) err-not-found))
+    (milestone (unwrap! (map-get? milestones {proposal-id: proposal-id, milestone-number: milestone-number}) err-milestone-not-found))
+  )
+    (asserts! (or (is-eq tx-sender contract-owner) (default-to false (map-get? members tx-sender))) err-unauthorized)
+    (asserts! (get executed proposal) err-proposal-not-active)
+    (asserts! (get active milestone-data) err-proposal-not-active)
+    (asserts! (not (get completed milestone)) err-milestone-already-completed)
+    
+    (begin
+      (if (> milestone-number u1)
+        (let ((prev-milestone (unwrap! (map-get? milestones {proposal-id: proposal-id, milestone-number: (- milestone-number u1)}) err-milestone-not-found)))
+          (asserts! (get completed prev-milestone) err-previous-milestone-incomplete)
+          true
+        )
+        true
+      )
+      
+      (asserts! (>= (var-get dao-treasury) (get amount milestone)) err-insufficient-funds)
+      
+      (try! (as-contract (stx-transfer? (get amount milestone) tx-sender (get recipient proposal))))
+      
+      (map-set milestones
+        {proposal-id: proposal-id, milestone-number: milestone-number}
+        (merge milestone {
+          completed: true,
+          verified-by: (some tx-sender),
+          completed-at: (some stacks-block-height),
+          verification-notes: verification-notes
+        })
+      )
+      
+      (map-set proposal-milestones proposal-id
+        (merge milestone-data {
+          completed-milestones: (+ (get completed-milestones milestone-data) u1),
+          total-released: (+ (get total-released milestone-data) (get amount milestone))
+        })
+      )
+      
+      (var-set dao-treasury (- (var-get dao-treasury) (get amount milestone)))
+      
+      (ok true)
+    )
+  )
+)
+
+(define-public (cancel-milestone-proposal (proposal-id uint))
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) err-not-found))
+    (milestone-data (unwrap! (map-get? proposal-milestones proposal-id) err-not-found))
+  )
+    (asserts! (or 
+      (is-eq tx-sender (get proposer proposal))
+      (is-eq tx-sender contract-owner)
+    ) err-unauthorized)
+    (asserts! (get active milestone-data) err-proposal-not-active)
+    
+    (map-set proposal-milestones proposal-id
+      (merge milestone-data {active: false})
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (get-proposal-milestones (proposal-id uint))
+  (map-get? proposal-milestones proposal-id)
+)
+
+(define-read-only (get-milestone (proposal-id uint) (milestone-number uint))
+  (map-get? milestones {proposal-id: proposal-id, milestone-number: milestone-number})
+)
+
+(define-read-only (get-milestone-progress (proposal-id uint))
+  (match (map-get? proposal-milestones proposal-id)
+    data (ok {
+      total: (get total-milestones data),
+      completed: (get completed-milestones data),
+      released: (get total-released data),
+      progress-percentage: (if (> (get total-milestones data) u0)
+        (/ (* (get completed-milestones data) u100) (get total-milestones data))
+        u0
+      ),
+      active: (get active data)
+    })
+    (err err-not-found)
+  )
+)
